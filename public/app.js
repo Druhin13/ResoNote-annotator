@@ -14,6 +14,9 @@ const state = {
   fusers: {},
   progress: 0,
   skippedTracks: [],
+  completedAnnotations: [],
+  sessionId: null,
+  fontScale: 1,
 };
 
 const $title = document.getElementById("track-title");
@@ -28,11 +31,19 @@ const $progressCircle = document.getElementById("progress-circle");
 const $totalSelections = document.getElementById("total-selections");
 const $queueCount = document.getElementById("queue-count");
 const $loading = document.getElementById("loading");
+const $completionModal = document.getElementById("completion-modal");
+const $zoomLevel = document.getElementById("zoom-level");
 
 const buttons = {
   confirm: document.getElementById("btn-confirm"),
   clear: document.getElementById("btn-clear"),
   skip: document.getElementById("btn-skip"),
+  download: document.getElementById("btn-download"),
+  downloadModal: document.getElementById("btn-download-modal"),
+  copyLyrics: document.getElementById("btn-copy-lyrics"),
+  zoomIn: document.getElementById("btn-zoom-in"),
+  zoomOut: document.getElementById("btn-zoom-out"),
+  zoomReset: document.getElementById("btn-zoom-reset"),
 };
 
 function shuffleArray(array) {
@@ -44,9 +55,115 @@ function shuffleArray(array) {
   return shuffled;
 }
 
+function generateSessionId() {
+  return 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+}
+
+function updateFontScale() {
+  document.documentElement.style.setProperty('--font-scale', state.fontScale);
+  const percentage = Math.round(state.fontScale * 100);
+  $zoomLevel.textContent = `${percentage}%`;
+  
+  const savedScale = {
+    scale: state.fontScale,
+    timestamp: Date.now()
+  };
+  localStorage.setItem('resonote-font-scale', JSON.stringify(savedScale));
+}
+
+function increaseTextSize() {
+  if (state.fontScale < 2.0) {
+    state.fontScale = Math.round((state.fontScale + 0.1) * 10) / 10;
+    updateFontScale();
+    showToast(`Text size: ${Math.round(state.fontScale * 100)}%`, "Text", "info");
+  }
+}
+
+function decreaseTextSize() {
+  if (state.fontScale > 0.5) {
+    state.fontScale = Math.round((state.fontScale - 0.1) * 10) / 10;
+    updateFontScale();
+    showToast(`Text size: ${Math.round(state.fontScale * 100)}%`, "Text", "info");
+  }
+}
+
+function resetTextSize() {
+  state.fontScale = 1.0;
+  updateFontScale();
+  showToast("Text size reset to 100%", "Reset", "info");
+}
+
+function loadFontScaleFromStorage() {
+  try {
+    const saved = localStorage.getItem('resonote-font-scale');
+    if (saved) {
+      const scaleData = JSON.parse(saved);
+      const age = Date.now() - scaleData.timestamp;
+      
+      if (age < 7 * 24 * 60 * 60 * 1000) {
+        state.fontScale = scaleData.scale;
+        updateFontScale();
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to load font scale from localStorage:', e);
+  }
+}
+
+async function copyLyrics() {
+  if (!state.current || !state.current.lyrics) {
+    showToast("No lyrics available to copy", "Warning", "warning");
+    return;
+  }
+  
+  try {
+    await navigator.clipboard.writeText(state.current.lyrics);
+    
+    buttons.copyLyrics.classList.add('copy-success');
+    buttons.copyLyrics.innerHTML = '<i class="ph ph-check"></i>';
+    
+    showToast("Lyrics copied to clipboard!", "Success", "success");
+    
+    setTimeout(() => {
+      buttons.copyLyrics.classList.remove('copy-success');
+      buttons.copyLyrics.innerHTML = '<i class="ph ph-copy"></i>';
+    }, 2000);
+    
+  } catch (error) {
+    console.error('Failed to copy lyrics:', error);
+    
+    const textArea = document.createElement('textarea');
+    textArea.value = state.current.lyrics;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    textArea.style.top = '-999999px';
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    
+    try {
+      document.execCommand('copy');
+      showToast("Lyrics copied to clipboard!", "Success", "success");
+      buttons.copyLyrics.classList.add('copy-success');
+      buttons.copyLyrics.innerHTML = '<i class="ph ph-check"></i>';
+      
+      setTimeout(() => {
+        buttons.copyLyrics.classList.remove('copy-success');
+        buttons.copyLyrics.innerHTML = '<i class="ph ph-copy"></i>';
+      }, 2000);
+    } catch (fallbackError) {
+      showToast("Failed to copy lyrics", "Error", "error");
+    }
+    
+    document.body.removeChild(textArea);
+  }
+}
+
 async function loadData() {
   try {
     showLoading(true);
+    
+    state.sessionId = generateSessionId();
     
     const [tRes, lRes] = await Promise.all([
       fetch("/api/tags"),
@@ -74,17 +191,17 @@ async function loadData() {
       .then((r) => (r.ok ? r.json() : { total: 0 }))
       .catch(() => ({ total: 0 }));
     
-    state.progress = idx.total || 0;
+    state.progress = 0;
     updateProgress();
     
     showLoading(false);
-    showToast("Data loaded successfully!", "✓", "success");
+    showToast("Data loaded successfully!", "Success", "success");
     
     showNextTrack();
     
   } catch (error) {
     console.error('Error loading data:', error);
-    showToast("Failed to load data. Please refresh.", "×", "error");
+    showToast("Failed to load data. Please refresh.", "Error", "error");
     showLoading(false);
   }
 }
@@ -104,7 +221,7 @@ function updateProgress() {
   
   const completed = state.currentIndex;
   const total = state.assignedTracks.length + state.skippedTracks.length;
-  const remaining = total - completed;
+  const remaining = Math.max(0, total - completed);
   
   $queueCount.textContent = remaining;
   
@@ -115,6 +232,10 @@ function updateProgress() {
   const offset = circumference - (Math.min(percentage, 100) / 100) * circumference;
   if ($progressCircle) {
     $progressCircle.style.strokeDashoffset = offset;
+  }
+  
+  if (remaining === 0 && state.progress > 0) {
+    showCompletionModal();
   }
 }
 
@@ -133,12 +254,9 @@ function showNextTrack() {
     if (state.skippedTracks.length > 0) {
       state.assignedTracks.push(...state.skippedTracks);
       state.skippedTracks = [];
-      showToast("Showing skipped tracks", "↻", "info");
+      showToast("Showing skipped tracks", "Info", "info");
     } else {
-      showToast("All tracks completed!", "✓", "success");
-      $title.textContent = "All tracks completed!";
-      $subtitle.textContent = "Thank you for your annotations";
-      $lyrics.textContent = "You have successfully annotated all assigned tracks.";
+      showCompletionModal();
       return;
     }
   }
@@ -159,6 +277,44 @@ function showNextTrack() {
   setTimeout(() => {
     $lyrics.style.opacity = '1';
   }, 100);
+}
+
+function showCompletionModal() {
+  $completionModal.style.display = 'flex';
+  if (buttons.download) {
+    buttons.download.style.display = 'inline-flex';
+  }
+  showToast("All tracks completed! You can now download your annotations.", "Success", "success");
+}
+
+function downloadAnnotations() {
+  const downloadData = {
+    session_id: state.sessionId,
+    completed_at: new Date().toISOString(),
+    total_tracks: 50,
+    completed_tracks: state.progress,
+    annotations: state.completedAnnotations,
+    assigned_tracks: state.assignedTracks.map(track => ({
+      track_id: track.track_id,
+      track_name: track.track_name,
+      artist_name: track.artist_name
+    }))
+  };
+  
+  const blob = new Blob([JSON.stringify(downloadData, null, 2)], {
+    type: 'application/json'
+  });
+  
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `resonote-annotations-${state.sessionId}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  
+  showToast("Annotations downloaded successfully!", "Success", "success");
 }
 
 function tagMarkup(f, v) {
@@ -279,7 +435,7 @@ function resetSelections() {
   }
   
   renderFacets();
-  showToast("All selections cleared", "×", "info");
+  showToast("All selections cleared", "Clear", "info");
 }
 
 function skipTrack() {
@@ -289,34 +445,45 @@ function skipTrack() {
   state.currentIndex++;
   resetSelections();
   showNextTrack();
-  showToast("Track skipped", "⏭", "info");
+  showToast("Track skipped", "Skip", "info");
 }
 
 async function save() {
   if (!state.current) {
-    showToast("No track selected", "!", "warning");
+    showToast("No track selected", "Warning", "warning");
     return;
   }
   
   const totalSelections = Object.values(state.selections).reduce((sum, set) => sum + set.size, 0);
   if (totalSelections === 0) {
-    showToast("Please select at least one tag", "!", "warning");
+    showToast("Please select at least one tag", "Warning", "warning");
     return;
   }
   
   try {
     buttons.confirm.disabled = true;
     const originalHTML = buttons.confirm.innerHTML;
-    buttons.confirm.innerHTML = '<svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/></svg>Saving...';
+    buttons.confirm.innerHTML = '<i class="ph ph-spinner ph-spin"></i>Saving...';
     
-    const payload = {
+    const annotationData = {
       track_id: state.current.track_id,
+      track_name: state.current.track_name,
+      artist_name: state.current.artist_name,
       selections: {
         Emotional_Tone: [...state.selections.Emotional_Tone],
         Thematic_Content: [...state.selections.Thematic_Content],
         Narrative_Structure: [...state.selections.Narrative_Structure],
         Lyrical_Style: [...state.selections.Lyrical_Style],
       },
+      annotated_at: new Date().toISOString(),
+      session_id: state.sessionId
+    };
+    
+    state.completedAnnotations.push(annotationData);
+    
+    const payload = {
+      track_id: state.current.track_id,
+      selections: annotationData.selections,
     };
     
     const res = await fetch("/api/annotate", {
@@ -329,7 +496,7 @@ async function save() {
       state.progress += 1;
       state.currentIndex++;
       updateProgress();
-      showToast(`Annotations saved! (${totalSelections} tags)`, "✓", "success");
+      showToast(`Annotations saved! (${totalSelections} tags)`, "Success", "success");
       
       setTimeout(() => {
         resetSelections();
@@ -342,14 +509,15 @@ async function save() {
     
   } catch (error) {
     console.error('Save error:', error);
-    showToast("Failed to save annotations", "×", "error");
+    showToast("Failed to save annotations", "Error", "error");
+    state.completedAnnotations.pop();
   } finally {
     buttons.confirm.disabled = false;
-    buttons.confirm.innerHTML = '<svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/><path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/></svg>Save Annotations';
+    buttons.confirm.innerHTML = '<i class="ph ph-floppy-disk"></i>Save Annotations';
   }
 }
 
-function showToast(message, icon = "i", type = "info") {
+function showToast(message, icon = "Info", type = "info") {
   if ($toastIcon && $toastMessage) {
     $toastIcon.textContent = icon;
     $toastMessage.textContent = message;
@@ -373,19 +541,43 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
         skipTrack();
         break;
+      case 'd':
+        e.preventDefault();
+        if (state.progress === 50) {
+          downloadAnnotations();
+        }
+        break;
+      case 'c':
+        e.preventDefault();
+        copyLyrics();
+        break;
+      case '=':
+      case '+':
+        e.preventDefault();
+        increaseTextSize();
+        break;
+      case '-':
+        e.preventDefault();
+        decreaseTextSize();
+        break;
+      case '0':
+        e.preventDefault();
+        resetTextSize();
+        break;
     }
   }
 });
 
 async function init() {
   try {
+    loadFontScaleFromStorage();
     await loadData();
     attachSearch();
     renderFacets();
     
   } catch (error) {
     console.error('Initialization error:', error);
-    showToast("Failed to initialize application", "×", "error");
+    showToast("Failed to initialize application", "Error", "error");
   }
 }
 
@@ -401,6 +593,30 @@ if (buttons.skip) {
   buttons.skip.addEventListener("click", skipTrack);
 }
 
+if (buttons.download) {
+  buttons.download.addEventListener("click", downloadAnnotations);
+}
+
+if (buttons.downloadModal) {
+  buttons.downloadModal.addEventListener("click", downloadAnnotations);
+}
+
+if (buttons.copyLyrics) {
+  buttons.copyLyrics.addEventListener("click", copyLyrics);
+}
+
+if (buttons.zoomIn) {
+  buttons.zoomIn.addEventListener("click", increaseTextSize);
+}
+
+if (buttons.zoomOut) {
+  buttons.zoomOut.addEventListener("click", decreaseTextSize);
+}
+
+if (buttons.zoomReset) {
+  buttons.zoomReset.addEventListener("click", resetTextSize);
+}
+
 const rippleStyle = document.createElement('style');
 rippleStyle.textContent = `
   @keyframes ripple {
@@ -412,15 +628,65 @@ rippleStyle.textContent = `
 `;
 document.head.appendChild(rippleStyle);
 
+function saveToLocalStorage() {
+  try {
+    const sessionData = {
+      sessionId: state.sessionId,
+      completedAnnotations: state.completedAnnotations,
+      assignedTracks: state.assignedTracks,
+      currentIndex: state.currentIndex,
+      progress: state.progress,
+      timestamp: Date.now()
+    };
+    localStorage.setItem('resonote-session', JSON.stringify(sessionData));
+  } catch (e) {
+    console.warn('Failed to save session to localStorage:', e);
+  }
+}
+
+function loadFromLocalStorage() {
+  try {
+    const saved = localStorage.getItem('resonote-session');
+    if (saved) {
+      const sessionData = JSON.parse(saved);
+      const age = Date.now() - sessionData.timestamp;
+      
+      if (age < 24 * 60 * 60 * 1000) {
+        state.sessionId = sessionData.sessionId;
+        state.completedAnnotations = sessionData.completedAnnotations || [];
+        state.assignedTracks = sessionData.assignedTracks || [];
+        state.currentIndex = sessionData.currentIndex || 0;
+        state.progress = sessionData.progress || 0;
+        return true;
+      } else {
+        localStorage.removeItem('resonote-session');
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to load session from localStorage:', e);
+  }
+  return false;
+}
+
+window.addEventListener('beforeunload', () => {
+  saveToLocalStorage();
+});
+
+setInterval(() => {
+  if (state.sessionId) {
+    saveToLocalStorage();
+  }
+}, 30000);
+
 window.addEventListener('unhandledrejection', (event) => {
   console.error('Unhandled promise rejection:', event.reason);
-  showToast("An unexpected error occurred", "×", "error");
+  showToast("An unexpected error occurred", "Error", "error");
 });
 
 window.addEventListener('beforeunload', (event) => {
   const totalSelections = Object.values(state.selections).reduce((sum, set) => sum + set.size, 0);
   
-  if (totalSelections > 0 && state.current) {
+  if (totalSelections > 0 && state.current && state.progress < 50) {
     event.preventDefault();
     event.returnValue = 'You have unsaved annotations. Are you sure you want to leave?';
     return event.returnValue;
