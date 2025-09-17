@@ -1,0 +1,22 @@
+{
+  "name": "resonote-annotator",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/Druhin13/ResoNote-annotator#readme",
+  "bugs": {
+    "url": "https://github.com/Druhin13/ResoNote-annotator/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Druhin13/ResoNote-annotator.git"
+  },
+  "license": "MIT",
+  "author": "Druhin13",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
